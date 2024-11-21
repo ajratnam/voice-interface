@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "ml hackathon"
+version = "0.1.0"
+description = ""
+authors = ["Ajay Ratnam <ajratnam.dev@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+wavio = "^0.0.9"
+sounddevice = "^0.5.1"
+websockets = "^14.1"
+pyngrok = "^7.2.1"
+pymongo = "^4.10.1"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
