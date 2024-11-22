@@ -70,6 +70,7 @@ class WhisperClient:
             ngrok_collection = db["ngrok"]
 
             ngrok_details = ngrok_collection.find_one()
+            print(f"Ngrok details: {ngrok_details}")
             if ngrok_details:
                 return ngrok_details["url"], ngrok_details["port"]
             else:
@@ -191,7 +192,7 @@ class WhisperClient:
 
         self.clear_button = ttk.Button(self.root, text="Clear Text Fields", command=self.clear_text_fields)
 
-        self.update_model(self.selected_model)
+        # self.update_model(self.selected_model)
 
     def update_model(self, selected):
         Thread(target=self._update_model_thread, args=(selected,)).start()

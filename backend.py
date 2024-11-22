@@ -20,13 +20,12 @@ class WhisperServer:
         self.port = port
         self.socketio_server = socketio_server
         self.model = None
-        self.model_name = "large"
+        self.model_name = "tiny"
         self.sio = socketio.Client()
         self.setup_socketio()
         self.chunk_size = 8192
         self.session_id = None
         self.file_hash_map = {}
-        self.huffman_cache = {}
         self.load_model(self.model_name)
 
     def setup_socketio(self):
@@ -64,7 +63,7 @@ class WhisperServer:
 
     def load_model(self, model_name):
         try:
-            if self.model_name != model_name:
+            if not self.model or self.model_name != model_name:
                 self.model = whisper.load_model(model_name)
                 self.model_name = model_name
             return {"status": "success", "message": f"Loaded {model_name} model successfully"}
@@ -83,6 +82,14 @@ class WhisperServer:
         except Exception as e:
             print(f"Error downloading audio file: {e}")
             return None
+
+    def send_output(self, mode, content):
+        mode = {"document": "pentest-vui", "chat": "chat", "create": "pentest-vui"}[mode]
+        try:
+            self.sio.emit(mode, {"session_id": "SESSION", "message": content})
+            print(f"Sent event '{mode}' with content to Socket.IO server")
+        except Exception as e:
+            print(f"Error sending event to Socket.IO server: {e}")
 
     def detect_language(self, audio_url):
         """Detect the language of the uploaded audio file."""
@@ -114,6 +121,7 @@ class WhisperServer:
             mel = whisper.log_mel_spectrogram(audio).to(self.model.device)
             options = whisper.DecodingOptions()
             result = whisper.decode(self.model, mel, options)
+            self.send_output(mode, result.text)
             return {"status": "success", "text": result.text}
         except Exception as e:
             return {"status": "error", "message": str(e)}
