@@ -1,40 +1,17 @@
-import re
+import requests
 import socket
 import json
-import uuid
-from hashlib import sha512
 import struct
 import whisper
 import tempfile
 import os
-import base64
 import threading
 import socketio
-import heapq
-from collections import Counter
 from pyngrok import ngrok
 from pymongo import MongoClient
+from dotenv import load_dotenv
 
-
-json_reg = re.compile(r"{.*}")
-
-
-class HuffmanNode:
-    def __init__(self, left=None, right=None, char=None, weight=0):
-        self.left = left
-        self.right = right
-        self.char = char
-        self.weight = weight
-
-    def walk(self, code, acc):
-        if self.char is not None:
-            code[self.char] = acc or "0"
-        else:
-            self.left.walk(code, acc + "0")
-            self.right.walk(code, acc + "1")
-
-    def __lt__(self, other):  # IMPORTANT FIX: Add comparison logic
-        return self.weight < other.weight
+load_dotenv()
 
 
 class WhisperServer:
@@ -43,7 +20,7 @@ class WhisperServer:
         self.port = port
         self.socketio_server = socketio_server
         self.model = None
-        self.model_name = "tiny"
+        self.model_name = "large"
         self.sio = socketio.Client()
         self.setup_socketio()
         self.chunk_size = 8192
@@ -51,38 +28,6 @@ class WhisperServer:
         self.file_hash_map = {}
         self.huffman_cache = {}
         self.load_model(self.model_name)
-
-    def huffman_encode(self, data):
-        if data in self.huffman_cache:
-            return self.huffman_cache[data]
-
-        freq = Counter(data)
-        heap = [(freq[char], HuffmanNode(char=char, weight=freq[char])) for char in freq]
-        heapq.heapify(heap)
-
-        while len(heap) > 1:
-            w1, n1 = heapq.heappop(heap)
-            w2, n2 = heapq.heappop(heap)
-            heapq.heappush(heap, (w1 + w2, HuffmanNode(left=n1, right=n2, weight=w1 + w2)))
-
-        code = {}
-        [(_, root)] = heap
-        root.walk(code, "")
-
-        encoded_data = "".join(code[char] for char in data)
-        self.huffman_cache[data] = encoded_data, code
-        return encoded_data, code
-
-    def huffman_decode(self, encoded_data, code):
-        reverse_code = {value: key for key, value in code.items()}
-        current_code = ""
-        decoded_data = []
-        for bit in encoded_data:
-            current_code += bit
-            if current_code in reverse_code:
-                decoded_data.append(reverse_code[current_code])
-                current_code = ""
-        return bytes(map(int, decoded_data))
 
     def setup_socketio(self):
         try:
@@ -92,146 +37,110 @@ class WhisperServer:
             print(f"Error connecting to Socket.IO server: {e}")
 
     def send_chunked(self, conn, data):
+        """Send data to the client in chunks."""
         try:
             send_json_data = json.dumps(data).encode()
-
             size = len(send_json_data)
             conn.sendall(struct.pack('!I', size))
-            conn.sendall(send_json_data)  # Send all at once
-
+            conn.sendall(send_json_data)
         except Exception as e:
             print(f"Error in send_chunked: {e}")
             raise
 
     def receive_chunked(self, conn):
+        """Receive data from the client in chunks."""
         try:
             size_data = conn.recv(4)
             if not size_data:
                 return None
             total_size = struct.unpack('!I', size_data)[0]
-            data = conn.recv(total_size)  # Receive all at once
+            data = conn.recv(total_size)
             if not data:
                 return None
-
-            print(data)
-
-            received_data = json.loads(data)
-            return received_data
-
+            return json.loads(data)
         except Exception as e:
-            raise
             print(f"Error in receive_chunked: {e}")
             return None
 
-    def send_output(self, mode, content):
-        mode = {"document": "gather_case_details", "chat": "chat", "create": "gather_case_details"}[mode]
-        try:
-            self.sio.emit(mode, {"session_id": self.session_id, "text": content})
-            print(f"Sent event '{mode}' with content to Socket.IO server")
-        except Exception as e:
-            print(f"Error sending event to Socket.IO server: {e}")
-
     def load_model(self, model_name):
         try:
-            self.model = whisper.load_model(model_name)
-            self.model_name = model_name
+            if self.model_name != model_name:
+                self.model = whisper.load_model(model_name)
+                self.model_name = model_name
             return {"status": "success", "message": f"Loaded {model_name} model successfully"}
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
-    def receive_audio_data(self, conn):
-        """Receive audio data in chunks"""
+    def download_audio(self, audio_url):
+        """Download audio file from the provided URL."""
         try:
-            message = self.receive_chunked(conn)
-            if not message:
-                return None, None
-
-            audio_data = message.get("audio_data")
-            mode = message.get("mode", "document")
-            return audio_data, mode
-
-        except Exception as e:
-            print(f"Error receiving audio data: {e}")
-            raise
-
-    def detect_language(self, audio_data):
-        try:
+            response = requests.get(audio_url, stream=True)
+            response.raise_for_status()
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-                temp_file.write(base64.b64decode(audio_data))
-                temp_path = temp_file.name
+                for chunk in response.iter_content(chunk_size=8192):
+                    temp_file.write(chunk)
+                return temp_file.name
+        except Exception as e:
+            print(f"Error downloading audio file: {e}")
+            return None
 
+    def detect_language(self, audio_url):
+        """Detect the language of the uploaded audio file."""
+        temp_path = self.download_audio(audio_url)
+        if not temp_path:
+            return {"status": "error", "message": "Failed to download audio file"}
+
+        try:
             audio = whisper.load_audio(temp_path)
             audio = whisper.pad_or_trim(audio)
-            if self.model_name in ["large", "turbo"]:
-                mel = whisper.log_mel_spectrogram(audio, n_mels=128).to(self.model.device)
-            else:
-                mel = whisper.log_mel_spectrogram(audio, n_mels=80).to(self.model.device)
+            mel = whisper.log_mel_spectrogram(audio).to(self.model.device)
             _, probs = self.model.detect_language(mel)
             detected_lang = max(probs, key=probs.get)
-
-            os.unlink(temp_path)
-
             return {"status": "success", "language": detected_lang}
         except Exception as e:
             return {"status": "error", "message": str(e)}
+        finally:
+            os.unlink(temp_path)
 
-    def transcribe_audio(self, audio_data, mode):
+    def transcribe_audio(self, audio_url, mode):
+        """Transcribe the uploaded audio file."""
+        temp_path = self.download_audio(audio_url)
+        if not temp_path:
+            return {"status": "error", "message": "Failed to download audio file"}
+
         try:
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-                temp_file.write(base64.b64decode(audio_data))
-                temp_path = temp_file.name
-
-            if mode == "create":
-                hash_value = sha512(audio_data.encode()).hexdigest()
-                self.session_id = self.file_hash_map.get(hash_value, str(uuid.uuid4()))
-                self.file_hash_map[hash_value] = self.session_id
-
             audio = whisper.load_audio(temp_path)
             audio = whisper.pad_or_trim(audio)
-            if self.model_name in ["large", "turbo"]:
-                mel = whisper.log_mel_spectrogram(audio, n_mels=128).to(self.model.device)
-            else:
-                mel = whisper.log_mel_spectrogram(audio, n_mels=80).to(self.model.device)
+            mel = whisper.log_mel_spectrogram(audio).to(self.model.device)
             options = whisper.DecodingOptions()
             result = whisper.decode(self.model, mel, options)
-
-            os.unlink(temp_path)
-
-            self.send_output(mode, result.text)
             return {"status": "success", "text": result.text}
         except Exception as e:
             return {"status": "error", "message": str(e)}
+        finally:
+            os.unlink(temp_path)
 
-    def translate_audio(self, audio_data, mode):
+    def translate_audio(self, audio_url, mode):
+        """Translate the uploaded audio file."""
+        temp_path = self.download_audio(audio_url)
+        if not temp_path:
+            return {"status": "error", "message": "Failed to download audio file"}
+
         try:
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
-                temp_file.write(base64.b64decode(audio_data))
-                temp_path = temp_file.name
-
-            if mode == "create":
-                hash_value = sha512(audio_data.encode()).hexdigest()
-                self.session_id = self.file_hash_map.get(hash_value, str(uuid.uuid4()))
-                self.file_hash_map[hash_value] = self.session_id
-
             audio = whisper.load_audio(temp_path)
             audio = whisper.pad_or_trim(audio)
-            if self.model_name in ["large", "turbo"]:
-                mel = whisper.log_mel_spectrogram(audio, n_mels=128).to(self.model.device)
-            else:
-                mel = whisper.log_mel_spectrogram(audio, n_mels=80).to(self.model.device)
+            mel = whisper.log_mel_spectrogram(audio).to(self.model.device)
             options = whisper.DecodingOptions(task="translate")
             result = whisper.decode(self.model, mel, options)
-
-            os.unlink(temp_path)
-
-            self.send_output(mode, result.text)
             return {"status": "success", "text": result.text}
         except Exception as e:
             return {"status": "error", "message": str(e)}
+        finally:
+            os.unlink(temp_path)
 
     def handle_client(self, conn, addr):
+        """Handle incoming client connections."""
         print(f"New connection from {addr}")
-
         while True:
             try:
                 message = self.receive_chunked(conn)
@@ -239,27 +148,23 @@ class WhisperServer:
                     break
 
                 command = message.get("command")
+                audio_url = message.get("audio_url")
+                mode = message.get("mode", "document")
 
                 if command == "load_model":
                     response = self.load_model(message["model_name"])
                 elif command == "detect_language":
-                    audio_data = message["audio_data"]
-                    response = self.detect_language(audio_data)
+                    response = self.detect_language(audio_url)
                 elif command == "transcribe":
-                    audio_data = message["audio_data"]
-                    mode = message.get("mode", "document")
-                    response = self.transcribe_audio(audio_data, mode)
+                    response = self.transcribe_audio(audio_url, mode)
                 elif command == "translate":
-                    audio_data = message["audio_data"]
-                    mode = message.get("mode", "document")
-                    response = self.translate_audio(audio_data, mode)
+                    response = self.translate_audio(audio_url, mode)
                 else:
                     response = {"status": "error", "message": "Unknown command"}
 
                 self.send_chunked(conn, response)
 
             except Exception as e:
-                raise
                 print(f"Error handling client: {e}")
                 break
 
@@ -267,11 +172,11 @@ class WhisperServer:
         print(f"Connection closed from {addr}")
 
     def start_tcp_server(self):
+        """Start the TCP server."""
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.bind((self.host, self.port))
         self.server.listen()
         print(f"TCP server listening on {self.host}:{self.port}")
-
         while True:
             conn, addr = self.server.accept()
             thread = threading.Thread(target=self.handle_client, args=(conn, addr))
@@ -286,7 +191,7 @@ class WhisperServer:
 
         # MongoDB connection
         try:
-            mongo_client = MongoClient("mongodb+srv://Gilgamesh:mDJRw2rvTw3wbo5v@botdbcluster.4vxflu6.mongodb.net/")
+            mongo_client = MongoClient(os.getenv("MONGO_URI"))
             db = mongo_client["PROJECT"]
             ngrok_collection = db["ngrok"]
 

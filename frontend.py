@@ -13,30 +13,12 @@ import json
 import base64
 import struct
 from threading import Thread, Event
-import heapq
-from collections import Counter
-import lzma
 from pymongo import MongoClient
+from dotenv import load_dotenv
+
+load_dotenv()
 
 json_reg = re.compile(r"{.*}")
-
-
-class HuffmanNode:
-    def __init__(self, left=None, right=None, char=None, weight=0):
-        self.left = left
-        self.right = right
-        self.char = char
-        self.weight = weight
-
-    def walk(self, code, acc):
-        if self.char is not None:
-            code[self.char] = acc or "0"
-        else:
-            self.left.walk(code, acc + "0")
-            self.right.walk(code, acc + "1")
-
-    def __lt__(self, other):  # IMPORTANT FIX: Add comparison logic
-        return self.weight < other.weight
 
 
 class WhisperClient:
@@ -83,7 +65,7 @@ class WhisperClient:
     def get_ngrok_details(self):
         try:
             # Connect to MongoDB and retrieve the Ngrok details
-            mongo_client = MongoClient("mongodb+srv://Gilgamesh:mDJRw2rvTw3wbo5v@botdbcluster.4vxflu6.mongodb.net/")
+            mongo_client = MongoClient(os.getenv("MONGO_URI"))
             db = mongo_client["PROJECT"]
             ngrok_collection = db["ngrok"]
 
@@ -209,7 +191,7 @@ class WhisperClient:
 
         self.clear_button = ttk.Button(self.root, text="Clear Text Fields", command=self.clear_text_fields)
 
-        # self.update_model(self.selected_model)
+        self.update_model(self.selected_model)
 
     def update_model(self, selected):
         Thread(target=self._update_model_thread, args=(selected,)).start()
