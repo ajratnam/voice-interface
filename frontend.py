@@ -94,7 +94,7 @@ class WhisperClient:
             self.root.quit()
 
     def send_command(self, command, **kwargs):
-        mode = self.mode if self.sent else "create"
+        mode = self.mode_var.get()
         message = {"command": command, "mode": mode, **kwargs}
         # print(f"Sending command: {message}")
         try:
